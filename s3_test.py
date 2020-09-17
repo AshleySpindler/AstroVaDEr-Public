@@ -43,198 +43,40 @@ Training consists of four phases:
 
 import configparser #used to read config file
 import numpy as np
-import time
 
 from keras.preprocessing.image import ImageDataGenerator
-from keras.layers import Input, Dense, Flatten, Reshape,\
-                         MaxPooling2D, UpSampling2D, Conv2D, Lambda,\
-                         GaussianNoise, LeakyReLU
 import keras.backend as K
-from keras import Model, regularizers
+from keras import Model
 from keras.utils import multi_gpu_model
 import tensorflow as tf
 
-from AE_GMM_Layer import GMMLayer_2
-from AV_Losses import gamma_training, beta_training, static_training, KL_metric, recon_metric, VaDE_metric, log_prob
-from AV_Layers import VAE_sampling, get_gamma, cond_z
+from AV_Models import encoder_setup, embedding_setup, decoder_setup
 
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 from itertools import product
 
-def encoder_setup(In_Shape, filters, kernels, params):
-    I = Input(shape=In_shape, dtype='float32', name='encoder_input') # (?, 128, 128, b)
-    Noise = GaussianNoise(1e-8)(I)
-    
-    Conv1 = Conv2D(filters[0], kernel_size=kernels[0],# activation='relu',
-                   padding='same', name='Conv1',
-                   kernel_regularizer=regularizers.l2(params['l2_regularizer']),
-                   bias_regularizer=regularizers.l2(params['l2_regularizer']),
-                   )(Noise) # (?, 128, 128, 32)
-    Conv1 = LeakyReLU(alpha=0.1)(Conv1)
-    Conv2 = Conv2D(filters[0], kernel_size=kernels[0],# activation='relu',
-                   padding='same', name='Conv2',
-                   kernel_regularizer=regularizers.l2(params['l2_regularizer']),
-                   bias_regularizer=regularizers.l2(params['l2_regularizer']),
-                   )(Conv1) # (?, 128, 128, 32)
-    Conv2 = LeakyReLU(alpha=0.1)(Conv2)
-    Pool1 = MaxPooling2D((2,2), name='Pool1')(Conv2) # (?, 64, 64, 32)
-    
-    Conv3 = Conv2D(filters[1], kernel_size=kernels[1],# activation='relu',
-                   padding='same', name='Conv3',
-                   kernel_regularizer=regularizers.l2(params['l2_regularizer']),
-                   bias_regularizer=regularizers.l2(params['l2_regularizer']),
-                   )(Pool1) # (?, 64, 64, 32)
-    Conv3 = LeakyReLU(alpha=0.1)(Conv3)
-    Conv4 = Conv2D(filters[1], kernel_size=kernels[1],# activation='relu',
-                   padding='same', name='Conv4',
-                   kernel_regularizer=regularizers.l2(params['l2_regularizer']),
-                   bias_regularizer=regularizers.l2(params['l2_regularizer']),
-                   )(Conv3) # (?, 64, 64, 32)
-    Conv4 = LeakyReLU(alpha=0.1)(Conv4)
-    Pool2 = MaxPooling2D((2,2), name='Pool2')(Conv4) # (?, 32, 32, 32)
-    
-    Conv5 = Conv2D(filters[2], kernel_size=kernels[2],# activation='relu',
-                   padding='same', name='Conv5',
-                   kernel_regularizer=regularizers.l2(params['l2_regularizer']),
-                   bias_regularizer=regularizers.l2(params['l2_regularizer']),
-                   )(Pool2) # (?, 32, 32, 16)
-    Conv5 = LeakyReLU(alpha=0.1)(Conv5)
-    Conv6 = Conv2D(filters[2], kernel_size=kernels[2],# activation='relu',
-                   padding='same', name='Conv6',
-                   kernel_regularizer=regularizers.l2(params['l2_regularizer']),
-                   bias_regularizer=regularizers.l2(params['l2_regularizer']),
-                   )(Conv5) # (?, 32, 32, 16)
-    Conv6 = LeakyReLU(alpha=0.1)(Conv6)
-    Pool3 = MaxPooling2D((2,2), name='Pool3')(Conv6) # (?, 16, 16, 16)
-    
-    
-    Flat = Flatten(name='Flat')(Pool3) # (?, 4096)
-    
-    return I, Flat
-
-def embedding_setup(params, enc_out):
-    z_mean = Dense(params['latents'], name='latentmean',
-                   kernel_regularizer=regularizers.l2(params['l2_regularizer']),
-                   bias_regularizer=regularizers.l2(params['l2_regularizer']),
-                   )(enc_out) # Edit namespace for CAE
-    z_log_var = Dense(params['latents'], name='latentlog_var',
-                   kernel_regularizer=regularizers.l2(params['l2_regularizer']),
-                   bias_regularizer=regularizers.l2(params['l2_regularizer']),
-                   )(enc_out) # Comment out for CAE
-    
-    z = Lambda(VAE_sampling, output_shape=(params['latents'],),
-               name='latentz_sampling')([z_mean,z_log_var]) # repara trick
-    
-    y_training = K.variable(False, dtype='bool')
-    z_out = Lambda(cond_z(y_training), output_shape=(params['latents'],),
-                   name='conditional_z_out')([z_mean, z]) # set input for decoder
-    
-    GMM = GMMLayer_2(params['latents'], params['clusters'], name='latentGMM_Layer')
-    z_out = GMM(z_out) # pass through layer containing GMM weights
-    
-    gmm_weights = { 'theta' : GMM.weights[0],
-                    'mu' : GMM.weights[1],
-                    'lambda' : GMM.weights[2],}
-    gamma_out, z_out = get_gamma(gmm_weights, params)(z_out)
-    
-    outputs = { 'z' : z,
-                'z_mean' : z_mean,
-                'z_log_var' : z_log_var,
-                'z_out' : z_out,
-                'gamma' : gamma_out,}
-    
-    return outputs, gmm_weights
-
-def decoder_setup(flat_units, filters, kernels, params, dec_in=None):
-    
-    if dec_in is None:
-        dec_in = Input(shape=(params['latents'],), dtype='float32', name='decoder_input')
-        
-    FC3 = Dense(flat_units[0], name='FC3',
-                   kernel_regularizer=regularizers.l2(0.01),
-                   bias_regularizer=regularizers.l2(0.01))(dec_in) # (?, 4096)
-    FC3 = LeakyReLU(alpha=0.1)(FC3)
-    reshape = Reshape((16,16,filters[2]), name='reshape')(FC3) # (?, 16, 16, 16)
-    
-    Conv7 = Conv2D(filters[2], kernel_size=kernels[2],# activation='relu',
-                   padding='same', name='Conv7',
-                   kernel_regularizer=regularizers.l2(params['l2_regularizer']),
-                   bias_regularizer=regularizers.l2(params['l2_regularizer']),
-                   )(reshape) # (?, 16, 16, 16) 
-    Conv7 = LeakyReLU(alpha=0.1)(Conv7)
-    Conv8 = Conv2D(filters[2], kernel_size=kernels[2],# activation='relu',
-                   padding='same', name='Conv8',
-                   kernel_regularizer=regularizers.l2(params['l2_regularizer']),
-                   bias_regularizer=regularizers.l2(params['l2_regularizer']),
-                   )(Conv7) # (?, 16, 16, 16) 
-    Conv8 = LeakyReLU(alpha=0.1)(Conv8)
-    Up1 = UpSampling2D((2,2), interpolation='bilinear',
-                       name='Up1')(Conv8) # (?, 32, 32, 16)
-    
-    Conv9 = Conv2D(filters[1], kernel_size=kernels[2],# activation='relu',
-                   padding='same', name='Conv9',
-                   kernel_regularizer=regularizers.l2(params['l2_regularizer']),
-                   bias_regularizer=regularizers.l2(params['l2_regularizer']),
-                   )(Up1) # (?, 32, 32, 32) 
-    Conv9 = LeakyReLU(alpha=0.1)(Conv9)
-    Conv10 = Conv2D(filters[1], kernel_size=kernels[2],# activation='relu',
-                   padding='same', name='Conv10',
-                   kernel_regularizer=regularizers.l2(params['l2_regularizer']),
-                   bias_regularizer=regularizers.l2(params['l2_regularizer']),
-                   )(Conv9) # (?, 32, 32, 32) 
-    Conv10 = LeakyReLU(alpha=0.1)(Conv10)
-    Up2 = UpSampling2D((2,2), interpolation='bilinear',
-                       name='Up2')(Conv10) # (?, 64, 64, 32)
-    
-    Conv11 = Conv2D(filters[0], kernel_size=kernels[2],# activation='relu',
-                   padding='same', name='Conv11',
-                   kernel_regularizer=regularizers.l2(params['l2_regularizer']),
-                   bias_regularizer=regularizers.l2(params['l2_regularizer']),
-                   )(Up2) # (?, 64, 64, 32) 
-    Conv11 = LeakyReLU(alpha=0.1)(Conv11)
-    Conv12 = Conv2D(filters[0], kernel_size=kernels[2],# activation='relu',
-                   padding='same', name='Conv12',
-                   kernel_regularizer=regularizers.l2(params['l2_regularizer']),
-                   bias_regularizer=regularizers.l2(params['l2_regularizer']),
-                   )(Conv11) # (?, 64, 64, 32) 
-    Conv12 = LeakyReLU(alpha=0.1)(Conv12)
-    Up3 = UpSampling2D((2,2), interpolation='bilinear',
-                       name='Up3')(Conv12) # (?, 128, 128, 32)
-    
-    Out = Conv2D(b, kernel_size=kernels[0], activation=params['output_activity'],
-                 padding='same', name='Output',
-                 kernel_regularizer=regularizers.l2(params['l2_regularizer']),
-                 bias_regularizer=regularizers.l2(params['l2_regularizer']),
-                 )(Up3) # (?, 128, 128, b)
-    
-    return dec_in, Out
-
-
 if __name__ == "__main__":
     #%%============================================================================
     # Initial Setup
     
-    """ Hyperparameters
-    TODO
-    """
-    
     config = configparser.ConfigParser()
     config.read('s3VDC-config.txt') 
     
-    Model_Name = 's3VDC_'+str(time.time())+'_'
-    test_dir = '/data/astroml/aspindler/AstroVaDEr/SCRATCH/Input/Processed/Test'
-    model_dir = config['directories']['model_dir']+'s3VDC/'
+    saved_weights = config['directories']['saved_weights']
+    test_dir = config['directories']['test_dir']
+    model_dir = config['directories']['model_dir']
     filters = [64,64,16]
     kernels = [(3,3), (5,5), (5,5)]
     flat_units = [4096]
     
     params = {}
     
-    params['batch_size'] = 60#int(config['training']['batch_size'])
-    n_train = 41160#int(config['training']['n_train'])
-    steps_per_epoch = n_train//params['batch_size']
+    params['batch_size'] = int(config['training']['batch_size'])
+    n_test = int(config['training']['n_test'])
+    steps_per_epoch = n_test//params['batch_size']
     params['l2_regularizer'] = float(config['training']['l2_regulariser'])
+    params['GPUs'] = int(config['training']['GPUs'])
     
     side = int(config['dataset']['side'])
     b = int(config['dataset']['b'])
@@ -258,15 +100,10 @@ if __name__ == "__main__":
                                                   color_mode=cm, class_mode=None,
                                                   batch_size=params['batch_size'],
                                                   shuffle=True)
-    x_test = np.zeros((n_train,128,128,1), dtype='float32')
+    x_test = np.zeros((n_test,128,128,1), dtype='float32')
     for i in range(steps_per_epoch):
         x_test[i*params['batch_size']:(i+1)*params['batch_size']] = test_generator.next()
-    """
-    def batch_generator(gen):
-        x1 = gen.next()
-        while True:
-            yield (x1,x1)
-    """     
+        
     #%%============================================================================
     # Model Setup
     
@@ -289,13 +126,16 @@ if __name__ == "__main__":
     
     # Parallelize
     
-    VADE_gpu = VADE#multi_gpu_model(VADE, gpus=2)
+    if params['GPUs'] > 1:
+        VADE_gpu = multi_gpu_model(VADE, gpus=params['GPUs'])
+    else:
+        VADE_gpu = VADE
     
     # Load trained weights
-    VADE.load_weights('SCRATCH/Models/s3VDC/s3VDC_1596552287.2881548_final_weights.h5')
-    encoder.load_weights('SCRATCH/Models/s3VDC/s3VDC_1596552287.2881548_final_weights.h5', by_name=True)
-    decoder.load_weights('SCRATCH/Models/s3VDC/s3VDC_1596552287.2881548_final_weights.h5', by_name=True)
-    """
+    VADE.load_weights(model_dir+saved_weights)
+    encoder.load_weights(model_dir+saved_weights, by_name=True)
+    decoder.load_weights(model_dir+saved_weights, by_name=True)
+    
     # Predict embeddings and image reconstructions
     z_mu, z_ls, z, y = encoder.predict(x_test, batch_size=100, verbose=True)
     c_v = np.argmax(y, axis=1)
@@ -309,7 +149,7 @@ if __name__ == "__main__":
     
     #%%============================================================================
     # Plot some random reconstructions with residuals
-    gals = np.random.choice(n_train, 60, replace=False)
+    gals = np.random.choice(n_test, 60, replace=False)
     fig = plt.figure(figsize=(18, 18))
     
     outer_grid = gridspec.GridSpec(5, 1, wspace=0.1, hspace=0.1, top=0.99, right=0.99, bottom=0.01, left=0.01)
@@ -842,7 +682,7 @@ if __name__ == "__main__":
             ax.spines['right'].set_visible(True)
     
     plt.show()
-    """
+    
     #%%============================================================================
     #Comparisons between VaDE clustering and GalZoo 2
     

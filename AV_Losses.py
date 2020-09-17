@@ -105,7 +105,7 @@ def static_training(outputs, weights, params):
                  ),
              axis=-1,
            )
-        latent_loss = K.mean(latent_loss)*0.3 #optional scaling factor
+        latent_loss = K.mean(latent_loss) * params['scale_jank']
 
         tot_loss = K.mean(recon_loss) + latent_loss
 
@@ -166,7 +166,7 @@ def beta_training(outputs, weights, params):
                  ),
              axis=-1,
            )
-        latent_loss = K.mean(latent_loss)*0.3
+        latent_loss = K.mean(latent_loss) * params['scale_jank']
         
         latent_loss = K.mean(recon_loss) + (K.pow(params['annealing_factor'],3)\
                                      + params['warm_up'])*latent_loss
@@ -223,7 +223,7 @@ def beta_training2(outputs, weights, params):
                  ),
              axis=-1,
            )
-        latent_loss = K.mean(latent_loss)*0.3
+        latent_loss = K.mean(latent_loss) * params['scale_jank']
         
         latent_loss = (K.pow(params['annealing_factor'],3)\
                                      + params['warm_up'])*latent_loss

@@ -17,7 +17,7 @@ from hard disk. This script uses 128x128xB images from Galaxy Zoo, which are
 stored as 256x256x3 uint PNGs.
 
 Training consists of four phases:
-    First, the CAE is trained using standard
+    First, the VAE is trained using standard
     KL divergence loss based on single Gaussian (gamma_training) with a small
     KL weights (y) compared to reconstruction loss (mse or bxe supported).
     
@@ -46,188 +46,63 @@ import numpy as np
 import time
 
 from keras.preprocessing.image import ImageDataGenerator
-from keras.layers import Input, Dense, Flatten, Reshape,\
-                         MaxPooling2D, UpSampling2D, Conv2D, Lambda,\
-                         GaussianNoise, LeakyReLU
 import keras.backend as K
-from keras import Model, optimizers, regularizers
+from keras import Model, optimizers
 from keras.callbacks import LearningRateScheduler, TensorBoard
 from keras.utils import multi_gpu_model
 import tensorflow as tf
 
-from AE_GMM_Layer import GMMLayer_2
 from AV_Losses import gamma_training, beta_training, static_training, KL_metric, recon_metric, VaDE_metric, log_prob
-from AV_Layers import VAE_sampling, get_gamma, cond_z
 from AV_Callbacks import lr_schedule, AnnealingCallback, MyModelCheckPoint
+from AV_Models import encoder_setup, embedding_setup, decoder_setup
 
 import matplotlib.pyplot as plt
 import sklearn.cluster as cluster
 import sklearn.mixture as mixture
 
-def encoder_setup(In_Shape, filters, kernels, params):
-    I = Input(shape=In_shape, dtype='float32', name='encoder_input') # (?, 128, 128, b)
-    Noise = GaussianNoise(1e-8)(I)
-    
-    Conv1 = Conv2D(filters[0], kernel_size=kernels[0],# activation='relu',
-                   padding='same', name='Conv1',
-                   kernel_regularizer=regularizers.l2(params['l2_regularizer']),
-                   bias_regularizer=regularizers.l2(params['l2_regularizer']),
-                   )(Noise) # (?, 128, 128, 32)
-    Conv1 = LeakyReLU(alpha=0.1)(Conv1)
-    Conv2 = Conv2D(filters[0], kernel_size=kernels[0],# activation='relu',
-                   padding='same', name='Conv2',
-                   kernel_regularizer=regularizers.l2(params['l2_regularizer']),
-                   bias_regularizer=regularizers.l2(params['l2_regularizer']),
-                   )(Conv1) # (?, 128, 128, 32)
-    Conv2 = LeakyReLU(alpha=0.1)(Conv2)
-    Pool1 = MaxPooling2D((2,2), name='Pool1')(Conv2) # (?, 64, 64, 32)
-    
-    Conv3 = Conv2D(filters[1], kernel_size=kernels[1],# activation='relu',
-                   padding='same', name='Conv3',
-                   kernel_regularizer=regularizers.l2(params['l2_regularizer']),
-                   bias_regularizer=regularizers.l2(params['l2_regularizer']),
-                   )(Pool1) # (?, 64, 64, 32)
-    Conv3 = LeakyReLU(alpha=0.1)(Conv3)
-    Conv4 = Conv2D(filters[1], kernel_size=kernels[1],# activation='relu',
-                   padding='same', name='Conv4',
-                   kernel_regularizer=regularizers.l2(params['l2_regularizer']),
-                   bias_regularizer=regularizers.l2(params['l2_regularizer']),
-                   )(Conv3) # (?, 64, 64, 32)
-    Conv4 = LeakyReLU(alpha=0.1)(Conv4)
-    Pool2 = MaxPooling2D((2,2), name='Pool2')(Conv4) # (?, 32, 32, 32)
-    
-    Conv5 = Conv2D(filters[2], kernel_size=kernels[2],# activation='relu',
-                   padding='same', name='Conv5',
-                   kernel_regularizer=regularizers.l2(params['l2_regularizer']),
-                   bias_regularizer=regularizers.l2(params['l2_regularizer']),
-                   )(Pool2) # (?, 32, 32, 16)
-    Conv5 = LeakyReLU(alpha=0.1)(Conv5)
-    Conv6 = Conv2D(filters[2], kernel_size=kernels[2],# activation='relu',
-                   padding='same', name='Conv6',
-                   kernel_regularizer=regularizers.l2(params['l2_regularizer']),
-                   bias_regularizer=regularizers.l2(params['l2_regularizer']),
-                   )(Conv5) # (?, 32, 32, 16)
-    Conv6 = LeakyReLU(alpha=0.1)(Conv6)
-    Pool3 = MaxPooling2D((2,2), name='Pool3')(Conv6) # (?, 16, 16, 16)
-    
-    
-    Flat = Flatten(name='Flat')(Pool3) # (?, 4096)
-
-    return I, Flat
-
-def embedding_setup(params, enc_out):
-    z_mean = Dense(params['latents'], name='latentmean',
-                   kernel_regularizer=regularizers.l2(params['l2_regularizer']),
-                   bias_regularizer=regularizers.l2(params['l2_regularizer']),
-                   )(enc_out) # Edit namespace for CAE
-    z_log_var = Dense(params['latents'], name='latentlog_var',
-                   kernel_regularizer=regularizers.l2(params['l2_regularizer']),
-                   bias_regularizer=regularizers.l2(params['l2_regularizer']),
-                   )(enc_out) # Comment out for CAE
-    
-    z = Lambda(VAE_sampling, output_shape=(params['latents'],),
-               name='latentz_sampling')([z_mean,z_log_var]) # repara trick
-    
-    y_training = K.variable(False, dtype='bool')
-    z_out = Lambda(cond_z(y_training), output_shape=(params['latents'],),
-                   name='conditional_z_out')([z_mean, z]) # set input for decoder
-    
-    GMM = GMMLayer_2(params['latents'], params['clusters'], name='latentGMM_Layer')
-    z_out = GMM(z_out) # pass through layer containing GMM weights
-    
-    gmm_weights = { 'theta' : GMM.weights[0],
-                    'mu' : GMM.weights[1],
-                    'lambda' : GMM.weights[2],}
-    gamma_out, z_out = get_gamma(gmm_weights, params)(z_out)
-    
-    outputs = { 'z' : z,
-                'z_mean' : z_mean,
-                'z_log_var' : z_log_var,
-                'z_out' : z_out,
-                'gamma' : gamma_out,}
-    
-    return outputs, gmm_weights
-
-def decoder_setup(flat_units, filters, kernels, params, dec_in=None):
-    
-    if dec_in is None:
-        dec_in = Input(shape=(params['latents'],), dtype='float32', name='decoder_input')
-
-    FC3 = Dense(flat_units[0], name='FC3',
-                   kernel_regularizer=regularizers.l2(0.01),
-                   bias_regularizer=regularizers.l2(0.01))(dec_in) # (?, 4096)
-    FC3 = LeakyReLU(alpha=0.1)(FC3)
-    reshape = Reshape((16,16,filters[2]), name='reshape')(FC3) # (?, 16, 16, 16)
-    
-    Conv7 = Conv2D(filters[2], kernel_size=kernels[2],# activation='relu',
-                   padding='same', name='Conv7',
-                   kernel_regularizer=regularizers.l2(params['l2_regularizer']),
-                   bias_regularizer=regularizers.l2(params['l2_regularizer']),
-                   )(reshape) # (?, 16, 16, 16) 
-    Conv7 = LeakyReLU(alpha=0.1)(Conv7)
-    Conv8 = Conv2D(filters[2], kernel_size=kernels[2],# activation='relu',
-                   padding='same', name='Conv8',
-                   kernel_regularizer=regularizers.l2(params['l2_regularizer']),
-                   bias_regularizer=regularizers.l2(params['l2_regularizer']),
-                   )(Conv7) # (?, 16, 16, 16) 
-    Conv8 = LeakyReLU(alpha=0.1)(Conv8)
-    Up1 = UpSampling2D((2,2), interpolation='bilinear',
-                       name='Up1')(Conv8) # (?, 32, 32, 16)
-    
-    Conv9 = Conv2D(filters[1], kernel_size=kernels[2],# activation='relu',
-                   padding='same', name='Conv9',
-                   kernel_regularizer=regularizers.l2(params['l2_regularizer']),
-                   bias_regularizer=regularizers.l2(params['l2_regularizer']),
-                   )(Up1) # (?, 32, 32, 32) 
-    Conv9 = LeakyReLU(alpha=0.1)(Conv9)
-    Conv10 = Conv2D(filters[1], kernel_size=kernels[2],# activation='relu',
-                   padding='same', name='Conv10',
-                   kernel_regularizer=regularizers.l2(params['l2_regularizer']),
-                   bias_regularizer=regularizers.l2(params['l2_regularizer']),
-                   )(Conv9) # (?, 32, 32, 32) 
-    Conv10 = LeakyReLU(alpha=0.1)(Conv10)
-    Up2 = UpSampling2D((2,2), interpolation='bilinear',
-                       name='Up2')(Conv10) # (?, 64, 64, 32)
-    
-    Conv11 = Conv2D(filters[0], kernel_size=kernels[2],# activation='relu',
-                   padding='same', name='Conv11',
-                   kernel_regularizer=regularizers.l2(params['l2_regularizer']),
-                   bias_regularizer=regularizers.l2(params['l2_regularizer']),
-                   )(Up2) # (?, 64, 64, 32) 
-    Conv11 = LeakyReLU(alpha=0.1)(Conv11)
-    Conv12 = Conv2D(filters[0], kernel_size=kernels[2],# activation='relu',
-                   padding='same', name='Conv12',
-                   kernel_regularizer=regularizers.l2(params['l2_regularizer']),
-                   bias_regularizer=regularizers.l2(params['l2_regularizer']),
-                   )(Conv11) # (?, 64, 64, 32) 
-    Conv12 = LeakyReLU(alpha=0.1)(Conv12)
-    Up3 = UpSampling2D((2,2), interpolation='bilinear',
-                       name='Up3')(Conv12) # (?, 128, 128, 32)
-    
-    Out = Conv2D(b, kernel_size=kernels[0], activation=params['output_activity'],
-                 padding='same', name='Output',
-                 kernel_regularizer=regularizers.l2(params['l2_regularizer']),
-                 bias_regularizer=regularizers.l2(params['l2_regularizer']),
-                 )(Up3) # (?, 128, 128, b)
-    
-    return dec_in, Out
-
-
 if __name__ == "__main__":
     #%%============================================================================
     # Initial Setup
     
-    """ Hyperparameters
-    TODO
+    """ Settings
+    Settings are read from a text file via configparser
+    Model name is set by user, + a time index so we don't accidentily overwrite
+    old model weights
+    Directories should point to train/test/valid directories that contain the
+    processed images inside another directory for keras data generator, i.e.:
+        /path/to/train/train/(images)
+        train_dir = '/path/to/train/'
+    filters and kernels currently set in script because reading lists is a pain
+    
+    params dictionary is passed to various functions, so it contains all the
+    model settings and such:
+        batch_size, n_train/test, epochs, ect: self explanetory
+        gmm_steps, warm_up_steps, _annealing_steps,
+        static_steps, annealing_periods: S3VDC parameters, see paper of Cao et
+        al 2020 reference within for details
+        l2_regularizer: regularising factor put on the weights and biases of
+        the convolutional blocks, etc.
+        GPUs: how many GPUs to use in training
+        side, bands, etc refer to image dimensions, i.e.: 128x128x1
+        clusters, latents are the number of GMM components and latent variables
+        lr_settings set up the lr and decay parameters
+        warm up is the KL weight during the warm up training phase
+        annealing factor is a keras variable that is updated during the training
+        of the gmm parameters
+        loss type and output activity depend on the type of data, MSE seems to
+        work best for galaxy images
+        scale jank is an additional weighting on the GMM loss during training,
+        because there's still some weirdness in the relative weighting of the
+        clustering a reconstructions losses
     """
     
     config = configparser.ConfigParser()
-    config.read('s3VDC-config.txt') 
+    config.read('s3VDC-config.txt')
     
-    Model_Name = 's3VDC_'+str(time.time())+'_'
+    Model_Name = config['directories']['Model_Name']+'-'+str(time.time())
     train_dir = config['directories']['train_dir']
     valid_dir = config['directories']['valid_dir']
-    model_dir = config['directories']['model_dir']+'s3VDC/'
+    model_dir = config['directories']['model_dir']
     filters = [64,64,16]
     kernels = [(3,3), (5,5), (5,5)]
     flat_units = [4096]
@@ -245,9 +120,10 @@ if __name__ == "__main__":
     params['total_steps'] = params['warm_up_steps'] + params['annealing_periods']\
                            * (params['annealing_steps'] + params['static_steps'])
     params['l2_regularizer'] = float(config['training']['l2_regulariser'])
+    params['GPUs'] = int(config['training']['GPUs'])
     
     side = int(config['dataset']['side'])
-    b = int(config['dataset']['b'])
+    b = params['bands'] = int(config['dataset']['b'])
     cm = 'grayscale' if b==1 else 'rgb'
     In_shape = (side,side,b)
     params['original_dims'] = side*side*b
@@ -265,14 +141,16 @@ if __name__ == "__main__":
     params['annealing_factor'] = K.variable(float(config['loss_settings']['warm_up_factor']), dtype='float32')
     params['loss_type'] = config['loss_settings']['loss_type']
     params['output_activity'] = 'sigmoid' if params['loss_type']=='binary_crossentropy' else 'relu'
+    params['scale_jank'] = config['loss_settings']['scale_jank']
     
     #%%============================================================================
     # Create image data generator - rotates images and improves contrast
     
-    datagen = ImageDataGenerator(rescale=1./255,#zoom_range=(0.75,0.75),
+    print('Loading data sets')
+    
+    datagen = ImageDataGenerator(rescale=1./255,
                                  horizontal_flip=True, vertical_flip=True,
-                                 dtype='float32', fill_mode='wrap',
-                                 preprocessing_function=None)
+                                 dtype='float32', fill_mode='wrap')
     train_generator = datagen.flow_from_directory(train_dir, target_size=(side,side),
                                                   color_mode=cm, class_mode='input',
                                                   batch_size=params['batch_size'],
@@ -287,12 +165,14 @@ if __name__ == "__main__":
     
     #%%============================================================================
     # Model Setup
-    
+    print('Setting up models')
     enc_in, enc_out = encoder_setup(In_shape, filters, kernels, params)
     outputs, gmm_weights = embedding_setup(params, enc_out)
     dec_in, dec_out = decoder_setup(flat_units, filters, kernels,
                                     params, dec_in=outputs['z_out'])
     with tf.device('/cpu:0'):
+        # we set these models to be on the CPU initially so theres no conflict
+        # on the GPU memory
         enc_vade = Model(inputs=enc_in, outputs=outputs['z_mean'], name='VADE_Encoder')
         
         VADE = Model(inputs=enc_in, outputs=dec_out, name='VADE')
@@ -321,9 +201,11 @@ if __name__ == "__main__":
     log_prob_met = log_prob(outputs['z_out'], gmm_weights, params)
 
     # Parallelize and Compile
-    
-    VADE_gpu = multi_gpu_model(VADE, gpus=2)
-    
+    if params['GPUs'] > 1:
+        VADE_gpu = multi_gpu_model(VADE, gpus=params['GPUs'])
+    else:
+        VADE_gpu = VADE
+        
     VADE_gpu.compile(optimizers.Adam(lr=params['lr']),
                 loss = warm_up_loss,
                 metrics = [recon_loss,vae_loss])
