@@ -43,15 +43,15 @@ if __name__ == '__main__':
     
     # DL train galaxies
     vals = np.where(np.isin(gz['OBJID'], train))[0]
-    pool = Pool(processes=-1)       #Set pool of processors
+    pool = Pool(processes=4)       #Set pool of processors
     pool.map(GalaxyGet(ID, ra, dec, petro_r90, sample='Train'), vals)      #Call function over iterable
 
     # DL test galaxies
     vals = np.where(np.isin(gz['OBJID'], test))[0]
-    pool = Pool(processes=-1)       #Set pool of processors
+    pool = Pool(processes=4)       #Set pool of processors
     pool.map(GalaxyGet(ID, ra, dec, petro_r90, sample='Test'), vals)      #Call function over iterable
 
     # DL valid galaxies
     vals = np.where(np.isin(gz['OBJID'], valid))[0]
-    pool = Pool(processes=-1)       #Set pool of processors
+    pool = Pool(processes=4)       #Set pool of processors
     pool.map(GalaxyGet(ID, ra, dec, petro_r90, sample='Valid'), vals)      #Call function over iterable
