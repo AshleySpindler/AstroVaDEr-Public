@@ -224,7 +224,6 @@ if __name__ == "__main__":
                                   steps_per_epoch=steps_per_epoch, initial_epoch=0,
                                   callbacks=[lr_decayCB, tb_logs, checkpoints],
                                   validation_data=(x_test, x_test),
-                                  use_multiprocessing=True, max_queue_size=1000,
                            )
     
     VADE.save_weights(model_dir+Model_Name+'warm_up_weights.h5')
@@ -312,7 +311,6 @@ if __name__ == "__main__":
                                   steps_per_epoch=steps_per_epoch, initial_epoch=params['warm_up_steps']+1,
                                   callbacks=[AnnealingCB, lr_decayCB, checkpoints, tb_logs],
                                   validation_data=(x_test, x_test),
-                                  use_multiprocessing=True, max_queue_size=1000,
                            )
     
     VADE.save_weights(model_dir+Model_Name+'final_weights.h5')
