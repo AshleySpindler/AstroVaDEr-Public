@@ -1,0 +1,33 @@
+[directories]
+Model_Name = AstroVaDEr-Paper
+train_dir = SCRATCH/Train
+test_dir = SCRATCH/Test
+valid_dir = SCRATCH/Valid
+model_dir = SCRATCH/Models/
+saved_weights = data/saved_weights.h5
+[training]
+batch_size = 190
+n_train = 159600
+n_test = 41600
+gmm_steps = 200
+warm_up_steps = 100
+annealing_steps = 25
+static_steps = 25
+annealing_periods = 5
+GPUs = 2
+l2_regulariser = 0.01
+[dataset]
+side = 128
+b = 1
+[embedding]
+latents = 20
+clusters = 12
+[lr_settings]
+lr = 3e-4
+min_lr = 1e-6
+lr_decay = 0.97
+lr_steps = 3
+[loss_settings]
+warm_up_factor = 1
+loss_type = mse
+scale_jank = 0.3
