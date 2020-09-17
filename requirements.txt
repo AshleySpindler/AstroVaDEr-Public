@@ -79,7 +79,7 @@ soupsieve==1.9.3
 statsmodels==0.10.1
 tabulate==0.8.4
 tensorboard==1.13.1
-tensorflow-gpu==1.13.2
+tensorflow-gpu==1.15.2
 tensorflow-estimator==1.13.0
 treelib==1.5.5
 wget==3.2
