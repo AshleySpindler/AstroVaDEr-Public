@@ -688,8 +688,15 @@ if __name__ == "__main__":
     
     # load in IDs of test galaxies so we can cross compare them with GZ2
     from astropy.io import fits
-    test_ids = np.load('/data/astroml/aspindler/AstroSense/Data/Scratch/GalZoo2/TestGals_IDs.npy')
-    gz_test = fits.open('/data/astroml/aspindler/AstroSense/Data/Scratch/GalZoo2/gz2_hart16.fits.gz')[1].data
+    try:
+        gz_test = fits.open('data/gz2_hart16.fits.gz')[1].data
+    except FileNotFoundError:
+        import wget
+        wget.download(url='http://zooniverse-data.s3.amazonaws.com/galaxy-zoo-2/gz2_hart16.fits.gz',
+                      out='data/gz2_hart16.fits.gz')
+        gz_test = fits.open('data/gz2_hart16.fits.gz')[1].data
+
+    test_ids = np.load('data/TestGals_IDs.npy')
     # discard gals not in test set
     gz_test = gz_test[np.where(np.isin(gz_test['dr7objid'],test_ids))[0]]
     # sort both files into same order
