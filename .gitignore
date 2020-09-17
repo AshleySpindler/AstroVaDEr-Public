@@ -1,7 +1,5 @@
 # folders
 SCRATCH/*
-ae-config.txt
-s3VDC-config.py
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
