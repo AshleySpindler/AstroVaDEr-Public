@@ -50,7 +50,7 @@ photutils==0.7.1
 pluggy==0.13.0
 ply==3.11
 progressbar2==3.46.1
-psutil==5.6.3
+psutil==5.6.6
 py==1.8.0
 pyasn1==0.4.7
 pyfiglet==0.8.post1
